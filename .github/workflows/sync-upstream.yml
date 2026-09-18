@@ -1,0 +1,34 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # Beijing (UTC+8): 07:20 daily; scheduled runs may be delayed by GitHub.
+    - cron: '20 23 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'itwxf0818/openwrt-passwall' && github.ref_name == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Merge upstream without overwriting fork changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BRANCH: main
+          UPSTREAM: Openwrt-Passwall/openwrt-passwall
+        run: |
+          set -euo pipefail
+          parent=$(gh api "repos/$GH_REPO" --jq '.parent.full_name')
+          test "$parent" = "$UPSTREAM" || { echo 'Unexpected upstream repository'; exit 1; }
+          # GitHub merges upstream changes and returns an error on conflicts.
+          # Do not reset the branch or force-push over custom commits.
+          gh api "repos/$GH_REPO/merge-upstream" --method POST -f "branch=$BRANCH"             --jq '.message' | tee -a "$GITHUB_STEP_SUMMARY"
