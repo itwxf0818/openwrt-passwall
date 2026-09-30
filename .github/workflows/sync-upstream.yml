@@ -2,7 +2,7 @@ name: Sync upstream
 
 on:
   schedule:
-    # Beijing (UTC+8): 07:20 daily; scheduled runs may be delayed by GitHub.
+    # Beijing time: 07:20 daily. GitHub may delay scheduled runs.
     - cron: '20 23 * * *'
   workflow_dispatch:
 
@@ -17,9 +17,11 @@ jobs:
   sync:
     if: github.repository == 'itwxf0818/openwrt-passwall' && github.ref_name == 'main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
-      - name: Merge upstream without overwriting fork changes
+      - name: Mirror upstream and preserve only this workflow
+        # Keep transient sync errors in the logs without failure emails.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -28,7 +30,24 @@ jobs:
         run: |
           set -euo pipefail
           parent=$(gh api "repos/$GH_REPO" --jq '.parent.full_name')
-          test "$parent" = "$UPSTREAM" || { echo 'Unexpected upstream repository'; exit 1; }
-          # GitHub merges upstream changes and returns an error on conflicts.
-          # Do not reset the branch or force-push over custom commits.
-          gh api "repos/$GH_REPO/merge-upstream" --method POST -f "branch=$BRANCH"             --jq '.message' | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$parent" = "$UPSTREAM"
+          gh auth setup-git
+          git clone --single-branch --branch "$BRANCH" "https://github.com/$GH_REPO.git" repo
+          cd repo
+          git fetch "https://github.com/$UPSTREAM.git" "$BRANCH"
+          upstream=$(git rev-parse FETCH_HEAD)
+          before=$(git rev-parse HEAD)
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # Build an upstream-identical tree, with just our scheduler retained.
+          git read-tree "$upstream"
+          git restore --source="$before" --staged -- .github/workflows/sync-upstream.yml
+          tree=$(git write-tree)
+          if [ "$tree" = "$(git rev-parse 'HEAD^{tree}')" ] && git merge-base --is-ancestor "$upstream" HEAD; then
+            echo 'Already synchronized with upstream.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          commit=$(git commit-tree "$tree" -p "$before" -p "$upstream" -m 'chore: mirror upstream, preserve sync workflow [skip ci]')
+          # Normal push preserves history and refuses concurrent overwrites.
+          git push origin "$commit:refs/heads/$BRANCH"
+          echo "Synchronized with upstream commit $upstream." >> "$GITHUB_STEP_SUMMARY"
